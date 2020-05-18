@@ -1,0 +1,160 @@
+#pragma once
+
+#include <archive.h>
+#include <archive_entry.h>
+
+#include <QMap>
+#include <QPair>
+#include <QString>
+
+class QZip {
+ public:
+  typedef enum {
+    stOK,
+    stEOF,
+    stSKIP,
+    stERROR
+  } StatusHeader;  // status from nextheader
+
+  typedef QPair<QString, QByteArray> pair_sb;
+
+  QZip() {}
+  QZip(QString zipfile) : zipfile(zipfile) {
+    init();
+    open();
+    if (ok) nextHeader();  // set to first
+  }
+  ~QZip() { zip_close(); }
+
+  size_t get_entry_size() { return archive_entry_size(entry); }
+
+  // for each support: for (auto &z:QZip("file.zip")) {auto f=z.filename(); auto
+  // d=z.read(); }
+  class iterator {
+   public:
+    iterator(QZip* qzip) : qzip(qzip) {}
+    iterator operator++() {
+      if (qzip->nextHeader() != stOK) qzip = nullptr;
+      return *this;
+    }
+    bool operator!=(const iterator& other) const { return qzip != other.qzip; }
+    const QZip& operator*() const { return *qzip; }
+
+   private:
+    QZip* qzip = nullptr;
+  };
+
+  iterator begin() { return iterator(this); }
+  iterator end() { return nullptr; }
+
+  // read the whole contents
+  QMap<QString, QByteArray> contents;
+  bool read_all() {
+    for (auto& z : *this) contents[z.filename()] = z.read();
+    return ok;
+  }
+  bool contains(QString name) const { return contents.contains(name); }
+
+  //
+  pair_sb operator()(QString fn, QString d) {
+    return pair_sb(fn, QByteArray(d.toUtf8()));
+  }
+
+  pair_sb read_pair() const { return pair_sb(filename(), read()); }
+
+  bool eq(pair_sb p, QString f, QString d) const {
+    return p.first == f && QString(p.second) == d;
+  }
+  bool eq(QString file, QString content) {
+    return QString(contents[file]) == content;
+  }
+  operator bool() const { return ok; }
+
+  QByteArray next() {
+    nextHeader();
+    return read();
+  }
+  pair_sb operator++(int) {  // post inc++
+    auto ba = read();
+    auto fn = filename();
+    ok = (nextHeader() == stOK);
+    return QPair(fn, ba);
+  }
+  QByteArray read() const {
+    QByteArray ba;
+    int len, sz;
+
+    sz = archive_entry_size(entry);
+    if (sz > 0) {
+      ba.resize(sz);
+      len = archive_read_data(arch, ba.data(), sz);
+      if (len < 0)
+        ba.clear();
+      else
+        ba[len] = 0;
+    }
+    return ba;
+  }
+  void close() { zip_close(); }
+  QString filename() const { return QString(archive_entry_pathname(entry)); }
+  int get_index() const { return file_index; }
+  QString sget_index() const { return QString::number(file_index); }
+  bool isOk() { return ok; }
+
+  QString zipfile;
+  int file_index = 0;
+
+ private:
+  void init() {
+    // create archive
+    arch = archive_read_new();
+    archive_read_support_format_all(arch);
+    archive_read_support_filter_all(arch);
+  }
+  void open() {
+    // open file
+    ok = (archive_read_open_filename(arch, zipfile.toUtf8().data(), 1024) ==
+          ARCHIVE_OK);
+  }
+
+  StatusHeader nextHeader() {
+    StatusHeader st;
+
+    int r = archive_read_next_header(arch, &entry);
+
+    if (r == ARCHIVE_EOF)
+      st = stEOF;
+    else {
+      if (r < ARCHIVE_OK || r < ARCHIVE_WARN)
+        st = stERROR;
+      else {
+        if (!S_ISREG(archive_entry_mode(entry)))
+          st = stSKIP;  // skip this
+        else {
+          st = stOK;
+          file_index++;
+        }
+      }
+    }
+
+    return st;
+  }
+  void reopen() {
+    zip_close();
+    init();
+    open();
+  }
+  void zip_close() {
+    // close & free archive
+    if (arch != nullptr) {
+      archive_read_close(arch);
+      archive_read_free(arch);
+      arch = nullptr;
+    }
+  }
+
+ private:
+  struct archive* arch = nullptr;
+  struct archive_entry* entry = nullptr;
+  bool ok = false;
+};
